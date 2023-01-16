@@ -1,95 +1,36 @@
-// utility functions (probably created woth ChatGPT lol)
-
-function readTextFromFile(filepath) {
-  const fs = require("fs");
-  return fs.readFileSync(filepath, "utf8");
-}
-
-function queryAPI(url) {
-  const https = require("https");
-  return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      let data = "";
-
-      res.on("data", (chunk) => {
-        data += chunk;
-      });
-
-      res.on("end", () => {
-        resolve(data);
-      });
-
-      res.on("error", (err) => {
-        reject(err);
-      });
-    });
-  });
-}
+import * as Api from "./riotApiCalls.js";
+import * as Constants from "./constants.js";
+import { truncate } from "fs";
+import { match } from "assert";
 
 function filterUnique(arr) {
   return Array.from(new Set(arr));
 }
 
 function sleep(ms) {
+  console.log(".");
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
 }
 
-// functions actually created by me to play with the riot api information
-function getKey() {
-  return readTextFromFile("key.txt");
+function getFirstInstanceOf(participants, summoner) {
+  let desired = null;
+  participants.forEach((participant) => {
+    if (participant.puuid == summoner.puuid) {
+      desired = participant;
+      return;
+    }
+  });
+  return desired; // in no case should this be null
 }
 
-function getUserName() {
-  return readTextFromFile("username.txt");
-}
-
-function getStartEpoch() {
-  return readTextFromFile("start.txt");
-}
-
-function getEndEpoch() {
-  return readTextFromFile("end.txt");
-}
-
-function getQueueID() {
-  return readTextFromFile("queueID.txt");
-}
-
-function getSummonerFromUsername(key, username) {
-  const url =
-    "https://na1.api.riotgames.com/lol/summoner/v4/summoners/by-name/" +
-    username +
-    "?api_key=" +
-    key;
-
-  return queryAPI(url);
-}
-
-function getMatchesInRange(key, puuid, startEpoch, endEpoch, queueID) {
-  const url =
-    "https://americas.api.riotgames.com/lol/match/v5/matches/by-puuid/" +
-    puuid +
-    "/ids?startTime=" +
-    startEpoch +
-    "&endTime=" +
-    endEpoch +
-    "&queue=" +
-    queueID +
-    "&type=ranked&start=0&count=100&api_key=" +
-    key;
-
-  return queryAPI(url);
-}
-
-async function getMatches(key, puuid, startEpoch, endEpoch, queueID) {
+async function getMatchIDs(key, puuid, startEpoch, endEpoch, queueID) {
   const secondsInRange = 86400; // 1 day
   let list = [];
-  let counter = 0;
   for (let i = startEpoch; i < endEpoch; i += secondsInRange) {
-    returnedObject = JSON.parse(
-      await getMatchesInRange(
+    const returnedObject = JSON.parse(
+      await Api.getMatchesInRange(
         key,
         puuid,
         i,
@@ -98,31 +39,38 @@ async function getMatches(key, puuid, startEpoch, endEpoch, queueID) {
       )
     );
     list = [...list, ...returnedObject.values()];
-    console.log(
-      "Day " + ++counter + " Collected!" + " List Length: " + list.length +", " +returnedObject.values().length +" New"
-    );
     await sleep(1500); // so we don't speed through our request limit.
   }
-  console.log(list.length);
-  list = filterUnique(list);
-  console.log(list.length);
+  return filterUnique(list);
+}
+
+async function getMatches(key, matchIDs) {
+  const list = [];
+  for (let i = 0; i < matchIDs.length; i++) {
+    const returnedObject = JSON.parse(await Api.getMatch(key, matchIDs[i]));
+    await sleep(1500);
+    list.push(returnedObject);
+  }
   return list;
 }
 
 // implementation
 async function runSequence() {
   // get the API key and username from the txt files
-  const key = getKey();
-  const username = getUserName();
-  const seasonStartEpoch = parseInt(getStartEpoch());
-  const seasonEndEpoch = parseInt(getEndEpoch());
-  const queueID = parseInt(getQueueID());
+  const key = Constants.getKey();
+  const username = Constants.getUserName();
+  const seasonStartEpoch = parseInt(Constants.getStartEpoch());
+  const seasonEndEpoch = Math.min(
+    parseInt(Constants.getEndEpoch()),
+    Date.now() / 1000
+  );
+  const queueID = parseInt(Constants.getQueueID());
 
   // retreive the basic summoner information
-  const summoner = JSON.parse(await getSummonerFromUsername(key, username));
+  const summoner = JSON.parse(await Api.getSummonerFromUsername(key, username));
 
   // for each day between the start and end of a season, retrieve the match history entries and aggregate them into a list
-  const matchIDs = await getMatches(
+  const matchIDs = await getMatchIDs(
     key,
     summoner.puuid,
     seasonStartEpoch,
@@ -130,8 +78,93 @@ async function runSequence() {
     queueID
   );
 
-  console.log(matchIDs);
-  console.log(matchIDs.length);
+  // for each match id retrieve aggregate the relevent match data list.
+  const matchData = await getMatches(key, matchIDs);
+
+  // custom object to store data
+  const releventData = {
+    matchData: null,
+    playerData: null,
+  };
+
+  // list of the custom object
+  const releventDataList = [];
+
+  // create an instance of the custom object for each match
+  matchData.forEach((match) => {
+    const data = Object.create(releventData);
+    data.matchData = match;
+    data.playerData = getFirstInstanceOf(match.info.participants, summoner);
+    releventDataList.push(data);
+  });
+
+  // sort the list
+  releventDataList.sort((a, b) => {
+    return a.matchData.info.gameCreation - b.matchData.info.gameCreation;
+  });
+
+  //console.log(releventDataList[0].matchData.info.teams);
+  //console.log(releventDataList[0].playerData);
+
+  releventDataList.forEach((releventDataEntry) => {
+    printStuff(releventDataEntry);
+  });
+}
+
+function printStuff(releventData) {
+  console.log();
+  console.log(
+    "Start Date/Time: " + new Date(releventData.matchData.info.gameCreation)
+  );
+  console.log(
+    "Side: " + (releventData.playerData.teamId == 100 ? "Blue" : "Red")
+  );
+  console.log("Result: " + (releventData.playerData.win ? "Win" : "Loss"));
+  console.log("Champion: " + releventData.playerData.championName);
+  console.log(
+    "Game Duration: " +
+      Math.trunc(releventData.matchData.info.gameDuration / 60) +
+      "m " +
+      (
+        (releventData.matchData.info.gameDuration / 60 -
+          Math.trunc(releventData.matchData.info.gameDuration / 60)) *
+        60
+      ).toFixed(0) +
+      "s"
+  );
+  console.log(
+    "KDA: " +
+      releventData.playerData.kills +
+      "/" +
+      releventData.playerData.deaths +
+      "/" +
+      releventData.playerData.assists +
+      " " +
+      (releventData.playerData.deaths == 0
+        ? "Perfect"
+        : (
+            (releventData.playerData.kills + releventData.playerData.assists) /
+            releventData.playerData.deaths
+          ).toFixed(2) + ":1")
+  );
+  console.log(
+    "Total Damage to Champions: " +
+      releventData.playerData.totalDamageDealtToChampions
+  );
+  console.log(
+    "Total Damage Taken: " + releventData.playerData.totalDamageTaken
+  );
+  console.log(
+    "CS: " +
+      (releventData.playerData.totalMinionsKilled + releventData.playerData.neutralMinionsKilled)+
+      " (" +
+      (
+        (releventData.playerData.totalMinionsKilled + releventData.playerData.neutralMinionsKilled) /
+        (releventData.matchData.info.gameDuration / 60)
+      ).toFixed(2) +
+      ")"
+  );
+  console.log("Vision Score: " + releventData.playerData.visionScore);
 }
 
 runSequence();
